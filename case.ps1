@@ -1,18 +1,20 @@
-
 # ============================================================
 # Case File Downloader
 # ============================================================
 # Features:
-#   - Ask for case number
+#   - Ask for case number first
+#   - Search E:\ for an existing case folder
+#   - Reuse an existing folder when found
+#   - Ask for MCO and Topic only for a new case
 #   - Ask for download URLs one at a time
 #   - Enter "e" to finish entering URLs
-#   - Create E:\<CaseNumber>
 #   - Download all files using fileName= from URL
 #   - Extract ZIP files
 #   - Delete ZIP files after successful extraction
 # ============================================================
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
 Add-Type -AssemblyName System.Web
 
@@ -23,62 +25,169 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
 # ------------------------------------------------------------
-# Ask for MCO / Topic / Case Number
+# Configuration
 # ------------------------------------------------------------
 
-$mco = Read-Host "Enter MCO"
-$topic = Read-Host "Enter Topic"
-$caseNumber = Read-Host "Enter Case Number"
+$caseRootFolder = "E:\"
 
-if (
-    [string]::IsNullOrWhiteSpace($mco) -or
-    [string]::IsNullOrWhiteSpace($topic) -or
-    [string]::IsNullOrWhiteSpace($caseNumber)
-)
-{
-    Write-Host "MCO, Topic, and Case Number are required." -ForegroundColor Red
-    exit
+if (-not (Test-Path -LiteralPath $caseRootFolder -PathType Container)) {
+    Write-Host "The case root folder does not exist: $caseRootFolder" -ForegroundColor Red
+    exit 1
 }
 
+# ------------------------------------------------------------
+# Ask for Case Number First
+# ------------------------------------------------------------
 
-# Remove invalid Windows folder characters
+$caseNumber = Read-Host "Enter Case Number"
+
+if ([string]::IsNullOrWhiteSpace($caseNumber)) {
+    Write-Host "Case Number is required." -ForegroundColor Red
+    exit 1
+}
+
+$caseNumber = $caseNumber.Trim()
+
+# Remove invalid Windows folder characters from the case number
 $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
 
 foreach ($char in $invalidChars) {
-    $mco        = $mco.Replace($char, "_")
-    $topic      = $topic.Replace($char, "_")
     $caseNumber = $caseNumber.Replace($char, "_")
 }
 
-# Optional: replace spaces with underscores
-$mco   = $mco.Trim()   -replace '\s+', '_'
-$topic = $topic.Trim() -replace '\s+', '_'
-
-# Folder format:
-# MCO_Topic_CaseNumber
-$folderName = "${mco}_${topic}_${caseNumber}"
+# Escape wildcard characters so that case numbers containing
+# [, ], *, or ? are treated as literal characters.
+$escapedCaseNumber = [WildcardPattern]::Escape($caseNumber)
 
 # ------------------------------------------------------------
-# Create Case Folder
+# Search for Existing Case Folder
+# ------------------------------------------------------------
+# Supported existing folder formats:
+#
+#   E:\CaseNumber
+#   E:\MCO_Topic_CaseNumber
+#
+# The comparison is case-insensitive.
 # ------------------------------------------------------------
 
-$caseFolder = Join-Path "E:\" $folderName
+Write-Host ""
+Write-Host "Checking for an existing folder for case: $caseNumber" -ForegroundColor Cyan
 
-if (-not (Test-Path -LiteralPath $caseFolder)) {
+$existingCaseFolders = @(
+    Get-ChildItem `
+        -LiteralPath $caseRootFolder `
+        -Directory `
+        -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.Name -ieq $caseNumber -or
+        $_.Name -ilike "*_$escapedCaseNumber"
+    }
+)
 
-    New-Item `
-        -ItemType Directory `
-        -Path $caseFolder | Out-Null
+$caseFolder = $null
+
+if ($existingCaseFolders.Count -eq 1) {
+
+    # Exactly one existing folder was found
+    $caseFolder = $existingCaseFolders[0].FullName
 
     Write-Host ""
-    Write-Host "Created folder: $caseFolder" -ForegroundColor Green
+    Write-Host "Existing case folder found." -ForegroundColor Green
+    Write-Host "Folder creation will be skipped." -ForegroundColor Yellow
+    Write-Host "Using folder: $caseFolder" -ForegroundColor Green
+}
+elseif ($existingCaseFolders.Count -gt 1) {
 
+    # Multiple matching folders were found
+    Write-Host ""
+    Write-Host "Multiple folders were found for case $caseNumber." -ForegroundColor Yellow
+    Write-Host "Select the folder you want to use:" -ForegroundColor Cyan
+    Write-Host ""
+
+    for ($i = 0; $i -lt $existingCaseFolders.Count; $i++) {
+        Write-Host "[$($i + 1)] $($existingCaseFolders[$i].FullName)"
+    }
+
+    Write-Host ""
+
+    while ($true) {
+
+        $selection = Read-Host "Enter folder number"
+
+        $selectedNumber = 0
+        $validNumber = [int]::TryParse($selection, [ref]$selectedNumber)
+
+        if (
+            $validNumber -and
+            $selectedNumber -ge 1 -and
+            $selectedNumber -le $existingCaseFolders.Count
+        ) {
+            $caseFolder = $existingCaseFolders[$selectedNumber - 1].FullName
+            break
+        }
+
+        Write-Host "Enter a number between 1 and $($existingCaseFolders.Count)." -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Host "Folder creation will be skipped." -ForegroundColor Yellow
+    Write-Host "Using folder: $caseFolder" -ForegroundColor Green
 }
 else {
 
-    Write-Host ""
-    Write-Host "Folder already exists, skipping creation: $caseFolder" -ForegroundColor Yellow
+    # --------------------------------------------------------
+    # No Existing Folder Found
+    # Ask for MCO and Topic, then create a new folder
+    # --------------------------------------------------------
 
+    Write-Host ""
+    Write-Host "No existing folder was found for case $caseNumber." -ForegroundColor Yellow
+    Write-Host "MCO and Topic are required to create a new folder." -ForegroundColor Cyan
+    Write-Host ""
+
+    $mco = Read-Host "Enter MCO"
+    $topic = Read-Host "Enter Topic"
+
+    if (
+        [string]::IsNullOrWhiteSpace($mco) -or
+        [string]::IsNullOrWhiteSpace($topic)
+    ) {
+        Write-Host "MCO and Topic are required for a new case folder." -ForegroundColor Red
+        exit 1
+    }
+
+    $mco = $mco.Trim()
+    $topic = $topic.Trim()
+
+    # Remove invalid Windows folder characters
+    foreach ($char in $invalidChars) {
+        $mco = $mco.Replace($char, "_")
+        $topic = $topic.Replace($char, "_")
+    }
+
+    # Replace one or more spaces with underscores
+    $mco = $mco -replace '\s+', '_'
+    $topic = $topic -replace '\s+', '_'
+
+    # Folder format:
+    # MCO_Topic_CaseNumber
+    $folderName = "${mco}_${topic}_${caseNumber}"
+    $caseFolder = Join-Path $caseRootFolder $folderName
+
+    New-Item `
+        -ItemType Directory `
+        -Path $caseFolder `
+        -Force |
+    Out-Null
+
+    Write-Host ""
+    Write-Host "Created folder: $caseFolder" -ForegroundColor Green
+}
+
+# Final folder validation
+if (-not (Test-Path -LiteralPath $caseFolder -PathType Container)) {
+    Write-Host "The selected case folder is not available: $caseFolder" -ForegroundColor Red
+    exit 1
 }
 
 # ------------------------------------------------------------
@@ -97,27 +206,22 @@ while ($true) {
 
     $link = Read-Host "Download link"
 
-    if ($link -eq "e" -or $link -eq "E") {
+    if ($link -ieq "e") {
         break
     }
 
     if ([string]::IsNullOrWhiteSpace($link)) {
-
         Write-Host "Empty input. Enter a URL or type e." -ForegroundColor Yellow
         continue
-
     }
 
     $downloadLinks += $link.Trim()
-
     Write-Host "Link added." -ForegroundColor Green
 }
 
 if ($downloadLinks.Count -eq 0) {
-
     Write-Host "No links entered." -ForegroundColor Yellow
     exit
-
 }
 
 # ------------------------------------------------------------
@@ -128,6 +232,7 @@ Write-Host ""
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Starting downloads..." -ForegroundColor Cyan
 Write-Host "Total files: $($downloadLinks.Count)" -ForegroundColor Cyan
+Write-Host "Case folder: $caseFolder" -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -136,9 +241,8 @@ for ($i = 0; $i -lt $downloadLinks.Count; $i++) {
     $url = $downloadLinks[$i]
 
     Write-Host ""
-    Write-Host "[$($i+1)/$($downloadLinks.Count)] Downloading:" -ForegroundColor Cyan
+    Write-Host "[$($i + 1)/$($downloadLinks.Count)] Downloading:" -ForegroundColor Cyan
     Write-Host $url -ForegroundColor Gray
-
 
     try {
 
@@ -151,75 +255,50 @@ for ($i = 0; $i -lt $downloadLinks.Count; $i++) {
         $fileName = $null
 
         try {
-
             $query = [System.Web.HttpUtility]::ParseQueryString($uri.Query)
-
             $fileName = $query["fileName"]
-
         }
         catch {
-
             $fileName = $null
-
         }
-
 
         # Fallback if fileName= is missing
-
         if ([string]::IsNullOrWhiteSpace($fileName)) {
-
             $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
-
         }
-
 
         # Final fallback
-
         if ([string]::IsNullOrWhiteSpace($fileName)) {
-
-            $fileName = "download_$($i+1)"
-
+            $fileName = "download_$($i + 1)"
         }
 
-
-        # Decode URL encoded filename
-
+        # Decode URL-encoded filename
         $fileName = [System.Uri]::UnescapeDataString($fileName)
 
+        # Remove invalid filename characters
+        foreach ($char in $invalidChars) {
+            $fileName = $fileName.Replace($char, "_")
+        }
 
         Write-Host "Filename detected: $fileName" -ForegroundColor Yellow
 
-
         $destination = Join-Path $caseFolder $fileName
 
-
-        # Avoid overwrite
-
+        # Avoid overwriting an existing file
         if (Test-Path -LiteralPath $destination) {
 
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($fileName)
-
             $extension = [System.IO.Path]::GetExtension($fileName)
-
             $count = 1
 
             do {
-
                 $newName = "$baseName`_$count$extension"
-
                 $destination = Join-Path $caseFolder $newName
-
                 $count++
-
             }
             while (Test-Path -LiteralPath $destination)
-
         }
 
-
-        # Download
-        
-        $ProgressPreference = 'SilentlyContinue' #increase speed
         # Download using curl.exe
         Write-Host "Downloading to: $destination" -ForegroundColor Cyan
 
@@ -235,14 +314,12 @@ for ($i = 0; $i -lt $downloadLinks.Count; $i++) {
             throw "curl.exe failed with exit code $LASTEXITCODE"
         }
 
-        # Verify that the file was actually created
-        if (-not (Test-Path -LiteralPath $destination)) {
+        # Verify that the file was created
+        if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
             throw "Download completed but the file was not found: $destination"
         }
 
         Write-Host "Downloaded successfully: $destination" -ForegroundColor Green
-
-
     }
     catch {
 
@@ -250,10 +327,16 @@ for ($i = 0; $i -lt $downloadLinks.Count; $i++) {
         Write-Host "DOWNLOAD FAILED" -ForegroundColor Red
         Write-Host $_.Exception.Message -ForegroundColor Red
 
+        # Remove an incomplete file if curl created one
+        if (
+            $null -ne $destination -and
+            (Test-Path -LiteralPath $destination -PathType Leaf)
+        ) {
+            Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+            Write-Host "Removed incomplete file: $destination" -ForegroundColor Yellow
+        }
     }
-
 }
-
 
 # ------------------------------------------------------------
 # Extract ZIP Files
@@ -264,62 +347,55 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Host "Checking ZIP files..." -ForegroundColor Cyan
 Write-Host "==========================================" -ForegroundColor Cyan
 
+$zipFiles = @(
+    Get-ChildItem `
+        -LiteralPath $caseFolder `
+        -Filter "*.zip" `
+        -File `
+        -ErrorAction SilentlyContinue
+)
 
-$zipFiles = Get-ChildItem `
-    -LiteralPath $caseFolder `
-    -Filter "*.zip" `
-    -File
-
+if ($zipFiles.Count -eq 0) {
+    Write-Host "No ZIP files found." -ForegroundColor Yellow
+}
 
 foreach ($zipFile in $zipFiles) {
 
     Write-Host ""
     Write-Host "Extracting: $($zipFile.Name)" -ForegroundColor Cyan
 
-
-    $extractFolder = Join-Path `
-        $caseFolder `
-        ([System.IO.Path]::GetFileNameWithoutExtension($zipFile.Name))
-
+    $extractFolderName = [System.IO.Path]::GetFileNameWithoutExtension($zipFile.Name)
+    $extractFolder = Join-Path $caseFolder $extractFolderName
 
     try {
 
         if (-not (Test-Path -LiteralPath $extractFolder)) {
-
             New-Item `
                 -ItemType Directory `
-                -Path $extractFolder | Out-Null
-
+                -Path $extractFolder |
+            Out-Null
         }
-
 
         Expand-Archive `
             -LiteralPath $zipFile.FullName `
             -DestinationPath $extractFolder `
             -Force
 
-
-        Write-Host "Extraction completed." -ForegroundColor Green
-
+        Write-Host "Extraction completed: $extractFolder" -ForegroundColor Green
 
         Remove-Item `
             -LiteralPath $zipFile.FullName `
             -Force
 
-
         Write-Host "Deleted ZIP: $($zipFile.Name)" -ForegroundColor Green
-
-
     }
     catch {
 
         Write-Host "Failed extracting $($zipFile.Name)" -ForegroundColor Red
+        Write-Host $_.Exception.Message -ForegroundColor Red
         Write-Host "ZIP kept for manual recovery." -ForegroundColor Yellow
-
     }
-
 }
-
 
 # ------------------------------------------------------------
 # Finished
@@ -332,24 +408,22 @@ Write-Host "==========================================" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "Case Folder:"
-Write-Host $caseFolder
+Write-Host $caseFolder -ForegroundColor Cyan
 
 Write-Host ""
-Write-Host "Files created:"
+Write-Host "Files currently in the case folder:"
 
 Get-ChildItem `
     -LiteralPath $caseFolder `
     -Recurse `
-    -File |
-    ForEach-Object {
-        Write-Host "  $($_.FullName)"
-    }
-
+    -File `
+    -ErrorAction SilentlyContinue |
+ForEach-Object {
+    Write-Host "  $($_.FullName)"
+}
 
 Write-Host ""
-Write-Host "Finished!"
-
-Invoke-Item $caseFolder
+Write-Host "Finished!" -ForegroundColor Green
 
 Set-Clipboard -Value $caseFolder
-
+Invoke-Item -LiteralPath $caseFolder
